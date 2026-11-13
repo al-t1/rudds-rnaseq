@@ -1,0 +1,17 @@
+work/
+results*/
+.nextflow/
+.nextflow.log*
+containers/*.sif
+containers/cache/
+
+# Input tables and references: private or third-party, not shared (see README)
+assets/
+
+# OmnipathR logs (local R runs)
+omnipathr-log/
+
+# R / RStudio session files
+.Rhistory
+.RData
+.Rproj.user/

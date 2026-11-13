@@ -1,0 +1,69 @@
+Bootstrap: docker
+From: bioconductor/bioconductor_docker:RELEASE_3_21
+
+# R 4.5 / Bioconductor 3.21 for analysis.R and qc_table.R. CRAN packages pinned
+# to the manuscript run's versions (r_cran_versions.tsv, from C:/R_libs)
+# Build (in this folder):  apptainer build --fakeroot rudds-r.sif rudds-r.def
+
+%labels
+    Description RUDDS analysis: R 4.5 / Bioconductor 3.21
+    Version 0.2.0
+
+%files
+    r_cran_versions.tsv /opt/r_cran_versions.tsv
+
+%post
+    export CRAN_SNAPSHOT=https://packagemanager.posit.co/cran/2026-09-17
+    # procps: 'ps' for Nextflow
+    apt-get update && apt-get install -y --no-install-recommends libhdf5-dev procps && rm -rf /var/lib/apt/lists/*
+
+    Rscript -e '
+      options(repos = c(CRAN = Sys.getenv("CRAN_SNAPSHOT")), Ncpus = 4)
+      stopifnot(BiocManager::version() == "3.21")
+      pkgs <- c(
+        # attached by analysis.R
+        "ggplot2", "ggrepel", "patchwork", "dplyr",
+        "DESeq2", "sva", "BiocParallel", "org.Hs.eg.db",
+        "clusterProfiler", "enrichplot", "decoupleR", "ggraph",
+        "ComplexHeatmap", "circlize",
+        "msigdbr", "fgsea", "signatureSearch", "ExperimentHub",
+        # called as pkg::fun
+        "AnnotationDbi", "data.table", "tibble", "tidyr", "tidygraph", "igraph",
+        "limma", "matrixStats", "DOSE", "ggpubr", "gridExtra", "ggforce",
+        "scatterpie", "png", "jsonlite", "openxlsx", "rstudioapi", "rtracklayer",
+        # CollecTRI fallback; FastQC parsing
+        "OmnipathR", "fastqcr",
+        # BayesPrism
+        "hdf5r", "Matrix", "remotes")
+      BiocManager::install(pkgs, update = FALSE, ask = FALSE)
+      # Commit of the manuscript run
+      remotes::install_github("Danko-Lab/BayesPrism/BayesPrism",
+                              ref = "1b693a9660ee4e1cd615c37c72f12ac4ec6dd496", upgrade = "never")
+
+      # Pin CRAN packages to the manuscript versions
+      lock <- read.delim("/opt/r_cran_versions.tsv", comment.char = "#")
+      have <- installed.packages()[, "Version"]
+      lock <- lock[lock$package %in% names(have) & have[lock$package] != lock$version, ]
+      failed <- character()
+      for (i in seq_len(nrow(lock))) {
+        ok <- tryCatch({
+          remotes::install_version(lock$package[i], lock$version[i], upgrade = "never",
+                                   dependencies = FALSE, quiet = TRUE)
+          packageVersion(lock$package[i]) == lock$version[i]
+        }, error = function(e) FALSE)
+        if (!isTRUE(ok)) failed <- c(failed, paste(lock$package[i], lock$version[i]))
+      }
+      if (length(failed)) message("Could not pin: ", paste(failed, collapse = ", "))
+      writeLines(failed, "/opt/r_pin_failed.txt")
+
+      need <- c(pkgs, "BayesPrism")
+      miss <- need[!vapply(need, requireNamespace, logical(1), quietly = TRUE)]
+      if (length(miss)) stop("Not installed: ", paste(miss, collapse = ", "))
+      ip <- installed.packages()
+      writeLines(paste(ip[, "Package"], ip[, "Version"], sep = "\t"), "/opt/r_package_versions.tsv")
+    '
+
+%test
+    command -v ps
+    Rscript -e 'library(DESeq2); library(clusterProfiler); library(signatureSearch); library(OmnipathR)
+      stopifnot(packageVersion("httr2") == "1.2.3"); cat("ok\n")'

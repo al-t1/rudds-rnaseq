@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ORA Layout Editor</title>
+<!-- Data written by exec_ora_network() (core_functions.R) -->
+<script src="ORA_layout_data.js"></script>
+<style>
+  :root {
+    --bg: #f4f4f2; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #d9d9dc;
+    --accent: #2563eb; --frame: #b9b9be; --sel: #111111; --warn: #b45309;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--ink); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+         display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 16px;
+           background: var(--panel); border-bottom: 1px solid var(--line); }
+  h1 { font-size: 15px; margin: 0 12px 0 0; font-weight: 600; }
+  .tabs { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .tabs button { border: 0; border-radius: 0; }
+  .tabs button[aria-pressed="true"] { background: var(--ink); color: #fff; }
+  button, label.btn { font: inherit; padding: 5px 11px; border: 1px solid var(--line); border-radius: 6px;
+                      background: var(--panel); color: var(--ink); cursor: pointer; }
+  button:hover, label.btn:hover { border-color: var(--muted); }
+  select { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
+           background: var(--panel); color: var(--ink); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  .spacer { flex: 1; }
+  #status { color: var(--muted); font-size: 13px; }
+  #status.dirty { color: var(--warn); }
+  .hint { padding: 6px 16px; color: var(--muted); font-size: 12.5px; border-bottom: 1px solid var(--line); }
+  kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px;
+        border-radius: 4px; padding: 0 4px; background: var(--panel); }
+  main { flex: 1; min-height: 0; padding: 16px; display: flex; }
+  svg { flex: 1; width: 100%; height: 100%; display: block; user-select: none; touch-action: none; }
+  .frame { fill: #fff; stroke: var(--frame); stroke-width: .6; stroke-dasharray: 3 3; }
+  .edge { stroke: #bebebe; stroke-width: .3; }
+  .node { cursor: grab; }
+  .node .hit { fill: transparent; }
+  .node .outline { fill: none; }
+  .node.sel .outline { stroke: var(--sel); stroke-width: 1.4; }
+  .seg { stroke: #000; stroke-width: .57; stroke-opacity: .5; pointer-events: none; }
+  .lbl { cursor: move; fill: #000; }
+  .lbl:hover, .lbl.active { fill: var(--accent); fill-opacity: 1; }
+  .no-labels .lbl, .no-labels .seg { display: none; }
+  .band { fill: rgba(37, 99, 235, .08); stroke: var(--accent); stroke-width: .6; stroke-dasharray: 2 2; }
+  .title { font-size: 32px; font-weight: 700; pointer-events: none; }
+  .empty { margin: auto; max-width: 560px; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 8px; padding: 20px 24px; }
+  .empty code { font: 13px ui-monospace, monospace; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ORA layout editor</h1>
+  <select id="fig" title="Figure (fig_id in ora_network_spec)"></select>
+  <div class="tabs" id="tabs"></div>
+  <button id="undo" title="Ctrl+Z">Undo</button>
+  <button id="reset" title="Back to the positions R exported">Reset panel</button>
+  <button id="labels" title="L">Hide labels</button>
+  <label class="btn" title="Continue from a saved ORA_layout_&lt;id&gt;.json">Load layout…<input type="file" id="load" accept=".json,application/json"></label>
+  <button id="save" class="primary" title="Ctrl+S">Save layout</button>
+  <span class="spacer"></span>
+  <span id="status"></span>
+</header>
+<div class="hint">
+  Drag a node (its label follows) or a label on its own · drag on empty space to select several nodes ·
+  <kbd>Shift</kbd>+drag a pathway to move it with the genes only it links to · arrow keys nudge the selection
+  (<kbd>Shift</kbd> ×10) · <kbd>Esc</kbd> clears it · <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo.
+  The final figure (F2_ORA_network) draws everything exactly where it is here.
+</div>
+<main id="main"></main>
+
+<script>
+(() => {
+  // One entry per figure (fig_id in ora_network_spec)
+  const FIGS = window.ORA_FIGS || null;
+  const main = document.getElementById('main');
+  if (!FIGS || !Object.keys(FIGS).length) {
+    main.innerHTML = '<div class="empty"><b>No network data found.</b><p>Copy <code>ORA_layout_data.js</code> ' +
+      '(written by the pipeline to <code>results/analysis/</code>, or by <code>analysis.R</code> to its folder) ' +
+      'next to this file. Then reload this page.</p></div>';
+    document.querySelectorAll('header button, header label').forEach(b => b.disabled = true);
+    return;
+  }
+
+  const PT = 72.27 / 25.4;                 // ggplot2 .pt: mm to points
+  // gene dot diameter in pt: R draws pch 16/21 at 0.75 x fontsize (size 2.5, stroke 0.5)
+  const GENE_D = 0.75 * (2.5 * PT + 0.5 * 3.78 / 2);
+  const GENE_FONT = 2 * PT, CAT_FONT = 3.75 * PT, LINE_HEIGHT = 0.9;
+  const LINES = 11 * 1.2;                  // grid "lines" unit in pt, as ggrepel measures it
+  const BOX_PAD = 0.25 * LINES, MIN_SEG = 0.5 * LINES;   // ggrepel defaults
+  const FC_LOW = [0x26, 0x79, 0xff], FC_HIGH = [0xEC, 0x8E, 0x12];
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  const STORE = 'ora-layout-autosave:';
+
+  // Current figure: its data (D), per-panel state (P), panel names, current panel, the
+  // file it saves to and whether it has unsaved edits. Each figure keeps its own state
+  // in `figs`, so switching figures loses nothing.
+  let figId, D, P, names, cur, fileHandle, dirty = false, statusMsg = '';
+  let sel = new Set(), drag = null, labelsOn = true;
+  const figs = {};
+
+  // Per panel: node positions and label offsets now and as exported, undo stack, adjacency
+  function initPanels(data) {
+    const out = {};
+    for (const nm of Object.keys(data.panels)) {
+      const p = data.panels[nm];
+      const nodes = p.nodes;
+      const adj = nodes.map(() => new Set());
+      for (const [a, b] of p.edges) { adj[a].add(b); adj[b].add(a); }
+      const genes = nodes.filter(n => !n.category).map(n => n.fc);
+      out[nm] = { ...p, adj, undo: [],
+                  pos: nodes.map(n => [n.x, n.y]), off: nodes.map(n => [n.lx || 0, n.ly || 0]),
+                  fcMax: Math.max(...genes.map(Math.abs)) };
+      out[nm].orig = snapshot(out[nm]);
+    }
+    return out;
+  }
+
+  function openFigure(id) {
+    if (figId) figs[figId] = { P, cur, fileHandle, dirty, statusMsg };
+    figId = id;
+    D = FIGS[id];
+    names = Object.keys(D.panels);
+    const s = figs[id];
+    if (s) {
+      ({ P, cur, fileHandle } = s);
+      setDirty(s.dirty, s.statusMsg);
+    } else {
+      P = initPanels(D);
+      cur = names[0];
+      fileHandle = null;
+      setDirty(false);
+      restore();
+      if (!dirty) setDirty(false, 'Data from R: ' + D.created);
+    }
+    try { localStorage.setItem(STORE + 'last', id); } catch (e) {}
+    sel = new Set();
+    buildTabs();
+    render();
+  }
+
+  function snapshot(p) { return { pos: p.pos.map(v => v.slice()), off: p.off.map(v => v.slice()) }; }
+  function restoreSnap(p, s) { p.pos = s.pos.map(v => v.slice()); p.off = s.off.map(v => v.slice()); }
+
+  // ── autosave, so a closed tab doesn't lose edits (per browser and figure) ──
+  function autosave() {
+    try { localStorage.setItem(STORE + figId, JSON.stringify({ created: D.created, layout: layoutJSON() })); } catch (e) {}
+  }
+  function restore() {
+    try {
+      const s = JSON.parse(localStorage.getItem(STORE + figId));
+      if (s && s.created === D.created && applyLayout(s.layout) > 0) {
+        setDirty(true, 'Restored unsaved edits from this browser');
+      }
+    } catch (e) {}
+  }
+
+  // ── geometry: data units <-> SVG points (1 SVG unit = 1 pt on the saved figure) ──
+  const W = p => p.width_in * 72, H = p => p.height_in * 72;
+  const fx = p => p.frame.x, fy = p => p.frame.y;
+  const scaleX = p => W(p) / (fx(p)[1] - fx(p)[0]), scaleY = p => H(p) / (fy(p)[1] - fy(p)[0]);
+  const toSvg = (p, [x, y]) => [(x - fx(p)[0]) * scaleX(p), (fy(p)[1] - y) * scaleY(p)];
+  const labelAt = (p, i) => [p.pos[i][0] + p.off[i][0], p.pos[i][1] + p.off[i][1]];
+
+  function fcColor(p, fc) {
+    // scale_color_gradient2(midpoint = 0): rescale_mid onto 0..1, white at 0.5
+    const t = 0.5 + fc / (2 * p.fcMax);
+    const [c, u] = t >= 0.5 ? [FC_HIGH, (t - 0.5) * 2] : [FC_LOW, (0.5 - t) * 2];
+    return 'rgb(' + c.map(v => Math.round(255 + (v - 255) * u)).join(',') + ')';
+  }
+
+  function el(tag, attrs, parent) {
+    const e = document.createElementNS(SVGNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+
+  // Pie as drawn by enrichplot (pie = 'equal'): one equal slice per source
+  function drawPie(g, p, n) {
+    const rx = n.r * scaleX(p), ry = n.r * scaleY(p);
+    const srcs = Object.keys(D.colors).filter(s => n[s] > 0);
+    el('ellipse', { rx, ry, fill: '#fff' }, g);
+    const pt = a => [rx * Math.cos(a), -ry * Math.sin(a)];
+    if (srcs.length === 1) {
+      el('ellipse', { rx, ry, fill: D.colors[srcs[0]], 'fill-opacity': .75 }, g);
+    } else {
+      let a = Math.PI / 2;
+      for (const s of srcs) {
+        const b = a - 2 * Math.PI / srcs.length, [x1, y1] = pt(a), [x2, y2] = pt(b);
+        el('path', { d: `M0 0L${x1} ${y1}A${rx} ${ry} 0 0 1 ${x2} ${y2}Z`,
+                     fill: D.colors[s], 'fill-opacity': .75 }, g);
+        a = b;
+      }
+    }
+    el('ellipse', { class: 'outline', rx, ry }, g);
+    el('ellipse', { class: 'hit', rx, ry }, g);
+  }
+
+  function drawGene(g, p, n) {
+    const r = GENE_D / 2;
+    el('circle', { r, fill: fcColor(p, n.fc), 'fill-opacity': .75,
+                   stroke: n.fc > 0 ? '#EC8E12' : '#2679ff', 'stroke-width': .5 * 3.78 / 2 }, g);
+    el('circle', { class: 'outline', r: r + 1 }, g);
+    el('circle', { class: 'hit', r: Math.max(r, 5) }, g);
+  }
+
+  // Label centred on its anchor, as geom_text_repel draws it (hjust = vjust = 0.5)
+  function drawLabel(parent, n, i) {
+    const fs = n.category ? CAT_FONT : GENE_FONT;
+    const lines = n.label.split('\n');
+    const t = el('text', { class: 'lbl', 'data-l': i, 'font-size': fs, 'text-anchor': 'middle',
+                           'fill-opacity': n.category ? .9 : .5, 'font-weight': n.bold ? 700 : 400 }, parent);
+    lines.forEach((ln, k) => {
+      el('tspan', { x: 0, y: fs * (0.35 + LINE_HEIGHT * (k - (lines.length - 1) / 2)) }, t).textContent = ln;
+    });
+    return t;
+  }
+
+  let svg, edgeEls, nodeEls, labelEls, segEls, labelBoxes, band;
+  function render() {
+    const p = P[cur];
+    main.innerHTML = '';
+    const pad = 8;    // the panel letter sits in the plot margin, 5.5 pt outside the frame
+    svg = el('svg', { viewBox: `-8 ${-pad} ${W(p) + 16} ${H(p) + pad + 8}`,
+                      preserveAspectRatio: 'xMidYMid meet', class: labelsOn ? '' : 'no-labels' }, main);
+    el('rect', { class: 'frame', x: 0, y: 0, width: W(p), height: H(p) }, svg);
+    const eg = el('g', {}, svg);
+    edgeEls = p.edges.map(() => el('line', { class: 'edge' }, eg));
+    const ng = el('g', {}, svg);
+    // pathways on top of genes, as in the figure
+    const order = p.nodes.map((n, i) => i).sort((a, b) => p.nodes[a].category - p.nodes[b].category);
+    nodeEls = [];
+    for (const i of order) {
+      const g = el('g', { class: 'node', 'data-i': i }, ng);
+      (p.nodes[i].category ? drawPie : drawGene)(g, p, p.nodes[i]);
+      nodeEls[i] = g;
+    }
+    // labels and their connector lines above everything, as ggrepel's layer is drawn last
+    const sg = el('g', {}, svg), lg = el('g', {}, svg);
+    segEls = p.nodes.map(() => el('line', { class: 'seg' }, sg));
+    labelEls = p.nodes.map((n, i) => drawLabel(lg, n, i));
+    labelBoxes = labelEls.map(t => t.getBBox());   // text extent around its anchor
+    // panel letter on top, like ggplot's tag
+    el('text', { class: 'title', x: -5.5, y: -5.5, 'dominant-baseline': 'text-before-edge' }, svg).textContent = cur;
+    band = el('rect', { class: 'band', visibility: 'hidden' }, svg);
+    update();
+  }
+
+  // Connector like ggrepel's: from the node to the padded label box, only when that
+  // gap is longer than min.segment.length
+  function segment(k, [nx, ny], [lx, ly]) {
+    const b = labelBoxes[k];
+    const x1 = lx + b.x - BOX_PAD, x2 = lx + b.x + b.width + BOX_PAD;
+    const y1 = ly + b.y - BOX_PAD, y2 = ly + b.y + b.height + BOX_PAD;
+    const ex = Math.min(Math.max(nx, x1), x2), ey = Math.min(Math.max(ny, y1), y2);
+    const show = Math.hypot(ex - nx, ey - ny) > MIN_SEG;
+    const s = segEls[k];
+    s.setAttribute('visibility', show ? 'visible' : 'hidden');
+    if (show) {
+      s.setAttribute('x1', nx); s.setAttribute('y1', ny);
+      s.setAttribute('x2', ex); s.setAttribute('y2', ey);
+    }
+  }
+
+  function update() {
+    const p = P[cur];
+    const s = p.pos.map(xy => toSvg(p, xy));
+    p.edges.forEach(([a, b], k) => {
+      const e = edgeEls[k];
+      e.setAttribute('x1', s[a][0]); e.setAttribute('y1', s[a][1]);
+      e.setAttribute('x2', s[b][0]); e.setAttribute('y2', s[b][1]);
+    });
+    nodeEls.forEach((g, i) => {
+      g.setAttribute('transform', `translate(${s[i][0]},${s[i][1]})`);
+      g.classList.toggle('sel', sel.has(i));
+    });
+    labelEls.forEach((t, i) => {
+      const l = toSvg(p, labelAt(p, i));
+      t.setAttribute('transform', `translate(${l[0]},${l[1]})`);
+      segment(i, s[i], l);
+    });
+    document.getElementById('undo').disabled = p.undo.length === 0;
+  }
+
+  // ── interaction ──
+  function svgPoint(e) {
+    const m = svg.getScreenCTM().inverse();
+    return [e.clientX * m.a + e.clientY * m.c + m.e, e.clientX * m.b + e.clientY * m.d + m.f];
+  }
+
+  // Largest move (data units) that keeps every moving point inside the frame
+  function clampDelta(p, pts, dx, dy) {
+    for (const [x, y] of pts) {
+      dx = Math.min(Math.max(dx, fx(p)[0] - x), fx(p)[1] - x);
+      dy = Math.min(Math.max(dy, fy(p)[0] - y), fy(p)[1] - y);
+    }
+    return [dx, dy];
+  }
+
+  function moveNodes(idx, dx, dy, base) {
+    const p = P[cur];
+    [dx, dy] = clampDelta(p, idx.map(i => base.pos[i]), dx, dy);
+    for (const i of idx) p.pos[i] = [base.pos[i][0] + dx, base.pos[i][1] + dy];
+  }
+
+  function moveLabel(i, dx, dy, base) {
+    const p = P[cur];
+    const at = [base.pos[i][0] + base.off[i][0], base.pos[i][1] + base.off[i][1]];
+    [dx, dy] = clampDelta(p, [at], dx, dy);
+    p.off[i] = [base.off[i][0] + dx, base.off[i][1] + dy];
+  }
+
+  function exclusiveGenes(p, i) {
+    return [...p.adj[i]].filter(j => !p.nodes[j].category && p.adj[j].size === 1);
+  }
+
+  main.addEventListener('pointerdown', e => {
+    if (!svg || e.button !== 0) return;
+    const p = P[cur], at = svgPoint(e);
+    const lbl = e.target.closest('.lbl'), g = e.target.closest('.node');
+    if (lbl) {
+      const i = +lbl.dataset.l;
+      lbl.classList.add('active');
+      drag = { type: 'label', at, i, el: lbl, base: snapshot(p), moved: false };
+    } else if (g) {
+      const i = +g.dataset.i;
+      let idx;
+      if (e.shiftKey && p.nodes[i].category) { idx = [i, ...exclusiveGenes(p, i)]; sel = new Set(idx); }
+      else if (sel.has(i)) idx = [...sel];
+      else { sel = new Set([i]); idx = [i]; }
+      drag = { type: 'move', at, idx, base: snapshot(p), moved: false };
+      g.style.cursor = 'grabbing';
+    } else {
+      if (!e.shiftKey) sel = new Set();
+      drag = { type: 'band', at, keep: new Set(sel) };
+    }
+    svg.setPointerCapture(e.pointerId);
+    update();
+  });
+
+  main.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const p = P[cur], [x, y] = svgPoint(e);
+    const dx = (x - drag.at[0]) / scaleX(p), dy = -(y - drag.at[1]) / scaleY(p);
+    if (drag.type === 'move') {
+      moveNodes(drag.idx, dx, dy, drag.base);
+      drag.moved = true;
+    } else if (drag.type === 'label') {
+      moveLabel(drag.i, dx, dy, drag.base);
+      drag.moved = true;
+    } else {
+      const x0 = Math.min(x, drag.at[0]), y0 = Math.min(y, drag.at[1]);
+      const x1 = Math.max(x, drag.at[0]), y1 = Math.max(y, drag.at[1]);
+      Object.entries({ x: x0, y: y0, width: x1 - x0, height: y1 - y0, visibility: 'visible' })
+        .forEach(([k, v]) => band.setAttribute(k, v));
+      sel = new Set(drag.keep);
+      p.pos.forEach((xy, i) => {
+        const [sx, sy] = toSvg(p, xy);
+        if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) sel.add(i);
+      });
+    }
+    update();
+  });
+
+  function endDrag() {
+    if (!drag) return;
+    if (drag.moved) commit(drag.base);
+    if (drag.el) drag.el.classList.remove('active');
+    band.setAttribute('visibility', 'hidden');
+    svg.querySelectorAll('.node').forEach(g => g.style.cursor = '');
+    drag = null;
+    update();
+  }
+  main.addEventListener('pointerup', endDrag);
+  main.addEventListener('pointercancel', endDrag);
+
+  // Record a change: the previous state goes on the undo stack
+  function commit(before) {
+    const p = P[cur];
+    p.undo.push(before);
+    if (p.undo.length > 200) p.undo.shift();
+    setDirty(true);
+    autosave();
+  }
+
+  function undo() {
+    const p = P[cur];
+    if (!p.undo.length) return;
+    restoreSnap(p, p.undo.pop());
+    setDirty(true);
+    autosave();
+    update();
+  }
+
+  let nudgeBase = null, nudgeTimer = null;
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return; }
+    if (e.key === 'Escape') { sel = new Set(); update(); return; }
+    if (e.key.toLowerCase() === 'l' && !e.ctrlKey && !e.metaKey) { toggleLabels(); return; }
+    const dir = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+    if (dir && sel.size) {
+      e.preventDefault();
+      const p = P[cur], step = e.shiftKey ? 10 : 1;   // pt on the figure
+      // a burst of key presses counts as one undo step
+      if (!nudgeBase) nudgeBase = snapshot(p);
+      moveNodes([...sel], dir[0] * step / scaleX(p), -dir[1] * step / scaleY(p), snapshot(p));
+      clearTimeout(nudgeTimer);
+      nudgeTimer = setTimeout(() => { commit(nudgeBase); nudgeBase = null; update(); }, 600);
+      update();
+    }
+  });
+
+  // ── layout file: categories shown, frame, node positions, label offsets (data units) ──
+  const round = v => Math.round(v * 1e6) / 1e6;
+  function layoutJSON() {
+    const out = {};
+    for (const nm of names) {
+      const p = P[nm];
+      out[nm] = { categories: p.categories, frame: p.frame,
+                  nodes: p.nodes.map((n, i) => ({ name: n.name, x: round(p.pos[i][0]), y: round(p.pos[i][1]),
+                                                  lx: round(p.off[i][0]), ly: round(p.off[i][1]) })) };
+    }
+    return out;
+  }
+
+  // Positions (and label offsets, when present) from a layout object onto matching
+  // nodes; returns how many nodes matched
+  function applyLayout(L) {
+    let hits = 0;
+    for (const nm of names) {
+      if (!L[nm] || !L[nm].nodes) continue;
+      const p = P[nm], before = snapshot(p);
+      const byName = new Map(L[nm].nodes.map(n => [n.name, n]));
+      let changed = 0;
+      p.nodes.forEach((n, i) => {
+        const s = byName.get(n.name);
+        if (!s) return;
+        p.pos[i] = [s.x, s.y];
+        if (s.lx != null) p.off[i] = [s.lx, s.ly];
+        changed++;
+      });
+      if (changed) { p.undo.push(before); hits += changed; }
+    }
+    return hits;
+  }
+
+  async function save() {
+    const text = JSON.stringify(layoutJSON(), null, 1);
+    try {
+      if (window.showSaveFilePicker) {
+        if (!fileHandle) {
+          fileHandle = await showSaveFilePicker({ suggestedName: D.layout_file, id: 'ora-layout',
+            types: [{ description: 'Layout', accept: { 'application/json': ['.json'] } }] });
+        }
+        const w = await fileHandle.createWritable();
+        await w.write(text);
+        await w.close();
+        setDirty(false, 'Saved to ' + fileHandle.name + ' at ' + new Date().toLocaleTimeString());
+        return;
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      fileHandle = null;
+    }
+    // Fallback: download (then move it to assets/, or pass it with --ora_layout)
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    a.download = D.layout_file;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setDirty(false, 'Downloaded ' + D.layout_file + ' — move it to assets/ (or pass it with --ora_layout)');
+  }
+
+  function setDirty(v, msg) {
+    dirty = v;
+    statusMsg = msg || (v ? 'Unsaved changes' : '');
+    const s = document.getElementById('status');
+    s.textContent = statusMsg;
+    s.className = v ? 'dirty' : '';
+  }
+
+  function toggleLabels() {
+    labelsOn = !labelsOn;
+    svg.classList.toggle('no-labels', !labelsOn);
+    document.getElementById('labels').textContent = labelsOn ? 'Hide labels' : 'Show labels';
+  }
+
+  // ── controls ──
+  const tabs = document.getElementById('tabs');
+  function buildTabs() {
+    tabs.innerHTML = '';
+    for (const nm of names) {
+      const b = document.createElement('button');
+      b.textContent = 'Panel ' + nm;
+      b.onclick = () => { cur = nm; sel = new Set(); syncTabs(); render(); };
+      tabs.appendChild(b);
+    }
+    syncTabs();
+  }
+  const syncTabs = () => [...tabs.children].forEach((b, k) => b.setAttribute('aria-pressed', names[k] === cur));
+
+  const figSelect = document.getElementById('fig');
+  for (const id of Object.keys(FIGS)) figSelect.add(new Option(id, id));
+  figSelect.hidden = figSelect.options.length < 2;
+  figSelect.onchange = () => openFigure(figSelect.value);
+
+  document.getElementById('undo').onclick = undo;
+  document.getElementById('labels').onclick = toggleLabels;
+  document.getElementById('save').onclick = save;
+  document.getElementById('reset').onclick = () => {
+    const p = P[cur], before = snapshot(p);
+    restoreSnap(p, p.orig);
+    commit(before);
+    update();
+  };
+  document.getElementById('load').onchange = async e => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    try {
+      const n = applyLayout(JSON.parse(await f.text()));
+      setDirty(true, n ? `Loaded ${n} node positions from ${f.name}` : `No matching nodes in ${f.name}`);
+      autosave();
+      update();
+    } catch (err) { setDirty(dirty, 'Could not read ' + f.name + ': ' + err.message); }
+  };
+  window.addEventListener('beforeunload', e => {
+    if (dirty || Object.entries(figs).some(([id, s]) => id !== figId && s.dirty)) {
+      e.preventDefault(); e.returnValue = '';
+    }
+  });
+
+  // Start with the figure open last time (or the one named in the URL: …html#selected)
+  let first = location.hash.slice(1);
+  if (!FIGS[first]) { try { first = localStorage.getItem(STORE + 'last'); } catch (e) {} }
+  if (!FIGS[first]) first = Object.keys(FIGS)[0];
+  figSelect.value = first;
+  openFigure(first);
+})();
+</script>
+</body>
+</html>
